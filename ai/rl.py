@@ -4,96 +4,214 @@ import torch.optim as optim
 import torch.nn.functional as F
 import numpy as np
 import random
+import os
 from collections import deque
 
-# 1. MẠNG NƠ-RON NHÂN TẠO (NEURAL NETWORK)
+MAX_MEMORY = 100000
+BATCH_SIZE = 1000
+LR = 0.001
+
+# ---------------------------------------------------------
+# 1. BỘ NÃO: MẠNG NƠ-RON SÂU 
+# ---------------------------------------------------------
 class Linear_QNet(nn.Module):
     def __init__(self, input_size, hidden_size, output_size):
         super().__init__()
         self.linear1 = nn.Linear(input_size, hidden_size)
-        self.linear2 = nn.Linear(hidden_size, output_size)
+        self.linear2 = nn.Linear(hidden_size, hidden_size // 2)
+        self.linear3 = nn.Linear(hidden_size // 2, output_size)
 
     def forward(self, x):
         x = F.relu(self.linear1(x))
-        x = self.linear2(x)
+        x = F.relu(self.linear2(x))
+        x = self.linear3(x)
         return x
 
-# 2. BỘ NÃO HỌC TĂNG CƯỜNG (RL AGENT)
+# ---------------------------------------------------------
+# 2. ĐẶC VỤ HỌC TĂNG CƯỜNG (BẢN GỐC + TẦM NHÌN XA)
+# ---------------------------------------------------------
 class DQNPlaceholder:
     def __init__(self):
         self.n_games = 0
-        self.epsilon = 0 # Tỉ lệ khám phá (Randomness)
-        self.gamma = 0.9 # Tỉ lệ chiết khấu tương lai (Discount rate)
-        self.memory = deque(maxlen=100000) # Bộ nhớ kinh nghiệm
+        self.epsilon = 0    
+        self.gamma = 0.9    
+        self.memory = deque(maxlen=MAX_MEMORY)
+        self.steps_without_food = 0 # Bộ đếm chống kẹt đi vòng tròn
         
-        # Input 11 trạng thái, Output 3 hành động (Đi thẳng, Rẽ phải, Rẽ trái)
-        self.model = Linear_QNet(11, 256, 3) 
-        self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)
+        self.model = Linear_QNet(14, 256, 3) 
+        self.optimizer = optim.Adam(self.model.parameters(), lr=LR)
         self.criterion = nn.MSELoss()
-
+        
         self.last_state = None
         self.last_action = None
-        self.last_head = None
-        self.last_food = None
-        self.last_length = 0
-
-    def get_state(self, head, goal, obstacles, grid_size):
-        """ Trích xuất 11 trạng thái từ môi trường """
-        if len(obstacles) > 1:
-            neck = obstacles[1]
+        
+        # Đổi tên file lưu để Rắn học lại 3 giác quan mới
+        self.model_path = "snake_brain_far_vision.pth"
+        if os.path.exists(self.model_path):
+            self.model.load_state_dict(torch.load(self.model_path))
+            self.model.eval() 
+            self.n_games = 100 
+            print("==> Đã tải File Trí Nhớ! Rắn đã có tầm nhìn xa.")
         else:
-            neck = (head[0]-1, head[1]) # Mặc định đầu hướng sang phải
+            print("==> Khởi tạo não bộ. Bắt đầu học né ngõ cụt...")
 
-        # Hướng di chuyển hiện tại
-        dir_l = head[0] < neck[0]
-        dir_r = head[0] > neck[0]
-        dir_u = head[1] < neck[1]
-        dir_d = head[1] > neck[1]
+    def _get_free_space(self, pt, body, grid_size, max_space):
+        """Thuật toán Loang (Flood Fill): Đếm số ô an toàn có thể đi được"""
+        if pt[0] < 0 or pt[0] >= grid_size or pt[1] < 0 or pt[1] >= grid_size or pt in body[:-1]:
+            return 0
+            
+        visited = set()
+        visited.add(pt)
+        queue = [pt]
+        count = 0
+        body_set = set(body[:-1]) 
 
-        # 4 ô xung quanh
-        point_l = (head[0] - 1, head[1])
-        point_r = (head[0] + 1, head[1])
-        point_u = (head[0], head[1] - 1)
-        point_d = (head[0], head[1] + 1)
+        while queue and count < max_space:
+            curr = queue.pop(0)
+            count += 1
+            for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                nx, ny = curr[0] + dx, curr[1] + dy
+                if 0 <= nx < grid_size and 0 <= ny < grid_size:
+                    if (nx, ny) not in body_set and (nx, ny) not in visited:
+                        visited.add((nx, ny))
+                        queue.append((nx, ny))
+        return count
 
-        def is_collision(pt):
-            if pt[0] < 0 or pt[0] >= grid_size or pt[1] < 0 or pt[1] >= grid_size:
-                return True
-            if pt in obstacles[:-1]:
-                return True
-            return False
+    def get_state(self, head, food, body, grid_size):
+        hx, hy = head
+        fx, fy = food
+        
+        if len(body) > 1: nx, ny = body[1]
+        else: nx, ny = hx - 1, hy 
+            
+        dir_r, dir_l, dir_d, dir_u = hx > nx, hx < nx, hy > ny, hy < ny
+        if not (dir_r or dir_l or dir_d or dir_u): dir_r = True
 
-        # Nhận diện nguy hiểm ở 3 hướng (Thẳng, Phải, Trái)
-        danger_straight = (dir_r and is_collision(point_r)) or (dir_l and is_collision(point_l)) or (dir_u and is_collision(point_u)) or (dir_d and is_collision(point_d))
-        danger_right = (dir_u and is_collision(point_r)) or (dir_d and is_collision(point_l)) or (dir_l and is_collision(point_u)) or (dir_r and is_collision(point_d))
-        danger_left = (dir_d and is_collision(point_r)) or (dir_u and is_collision(point_l)) or (dir_r and is_collision(point_u)) or (dir_l and is_collision(point_d))
+        pt_u = (hx, hy - 1)
+        pt_d = (hx, hy + 1)
+        pt_l = (hx - 1, hy)
+        pt_r = (hx + 1, hy)
+
+        def is_danger(pt):
+            return pt[0] < 0 or pt[0] >= grid_size or pt[1] < 0 or pt[1] >= grid_size or pt in body[:-1]
+
+        danger_u = is_danger(pt_u)
+        danger_d = is_danger(pt_d)
+        danger_l = is_danger(pt_l)
+        danger_r = is_danger(pt_r)
+
+        # XÁC ĐỊNH NGÕ CỤT BẰNG TẦM NHÌN XA
+        if dir_r: pt_straight, pt_right, pt_left = pt_r, pt_d, pt_u
+        elif dir_l: pt_straight, pt_right, pt_left = pt_l, pt_u, pt_d
+        elif dir_u: pt_straight, pt_right, pt_left = pt_u, pt_r, pt_l
+        elif dir_d: pt_straight, pt_right, pt_left = pt_d, pt_l, pt_r
+
+        snake_len = len(body)
+        # Nếu số ô trống nhỏ hơn độ dài cơ thể => Đó là ngõ cụt (Trap = 1)
+        trap_straight = 1 if self._get_free_space(pt_straight, body, grid_size, snake_len) < snake_len else 0
+        trap_right = 1 if self._get_free_space(pt_right, body, grid_size, snake_len) < snake_len else 0
+        trap_left = 1 if self._get_free_space(pt_left, body, grid_size, snake_len) < snake_len else 0
 
         state = [
-            danger_straight, danger_right, danger_left,
+            # 1. Nguy hiểm ngay trước mặt (Giữ nguyên bản gốc)
+            (dir_u and danger_u) or (dir_d and danger_d) or (dir_l and danger_l) or (dir_r and danger_r), 
+            (dir_u and danger_r) or (dir_d and danger_l) or (dir_l and danger_u) or (dir_r and danger_d), 
+            (dir_u and danger_l) or (dir_d and danger_r) or (dir_l and danger_d) or (dir_r and danger_u), 
+            
+            # 2. NHẬN DIỆN NGÕ CỤT (3 Giác quan mới)
+            trap_straight,
+            trap_right,
+            trap_left,
+
+            # 3. Hướng & Thức ăn (Giữ nguyên bản gốc)
             dir_l, dir_r, dir_u, dir_d,
-            goal[0] < head[0],  # Thức ăn ở bên trái
-            goal[0] > head[0],  # Thức ăn ở bên phải
-            goal[1] < head[1],  # Thức ăn ở phía trên
-            goal[1] > head[1]   # Thức ăn ở phía dưới
+            fx < hx, fx > hx, fy < hy, fy > hy
         ]
         return np.array(state, dtype=int)
 
-    def train_step(self, state, action, reward, next_state, done):
-        """ Huấn luyện mạng Nơ-ron (Backpropagation) """
-        state = torch.tensor(state, dtype=torch.float)
-        next_state = torch.tensor(next_state, dtype=torch.float)
-        action = torch.tensor(action, dtype=torch.long)
-        reward = torch.tensor(reward, dtype=torch.float)
+    def get_path(self, head, food, body, grid_size):
+        self.steps_without_food += 1
+        
+        # Hỗ trợ chống kẹt: Đi vòng tròn vô nghĩa quá 200 bước thì reset
+        if self.steps_without_food > 200:
+            return [(-1, -1)], []
 
-        if len(state.shape) == 1:
-            state = torch.unsqueeze(state, 0)
-            next_state = torch.unsqueeze(next_state, 0)
-            action = torch.unsqueeze(action, 0)
-            reward = torch.unsqueeze(reward, 0)
+        state = self.get_state(head, food, body, grid_size)
+        
+        # Sửa lỗi Epsilon bị âm của bản gốc
+        self.epsilon = max(0, 80 - self.n_games)
+        final_move = [0, 0, 0] 
+        
+        if random.randint(0, 200) < self.epsilon:
+            move = random.randint(0, 2)
+            final_move[move] = 1
+        else:
+            state_tensor = torch.tensor(state, dtype=torch.float)
+            prediction = self.model(state_tensor)
+            move = torch.argmax(prediction).item()
+            final_move[move] = 1
+
+        self.last_action = final_move
+        self.last_state = state
+
+        if len(body) > 1: nx, ny = body[1]
+        else: nx, ny = head[0] - 1, head[1]
+        
+        dir_r, dir_d, dir_l, dir_u = head[0] > nx, head[1] > ny, head[0] < nx, head[1] < ny
+        if not (dir_r or dir_d or dir_l or dir_u): dir_r = True
+        
+        clock_wise = [(0, -1), (1, 0), (0, 1), (-1, 0)] 
+        idx = 0
+        if dir_u: idx = 0
+        elif dir_r: idx = 1
+        elif dir_d: idx = 2
+        elif dir_l: idx = 3
+
+        if final_move == [1, 0, 0]: new_dir = clock_wise[idx]             
+        elif final_move == [0, 1, 0]: new_dir = clock_wise[(idx + 1) % 4] 
+        else: new_dir = clock_wise[(idx - 1) % 4]                         
+
+        next_head = (head[0] + new_dir[0], head[1] + new_dir[1])
+        return [next_head], []
+
+    # ---------------------------------------------------------
+    # 3. HỆ THỐNG HUẤN LUYỆN VÀ GHI NHỚ
+    # ---------------------------------------------------------
+    def update_q_value(self, state, action, reward, next_state):
+        if reward > 0:
+            self.steps_without_food = 0
+
+        done = (reward == -10.0) or (self.steps_without_food > 200)
+        
+        if done:
+            reward = -10.0
+
+        if next_state is None:
+            next_state = state 
+            
+        self.memory.append((state, action, reward, next_state, done))
+        self.train_step(state, action, reward, next_state, done)
+        
+        if done:
+            self.n_games += 1
+            self.steps_without_food = 0
+            self.train_long_memory()
+            self.save_model()
+
+    def train_step(self, state, action, reward, next_state, done):
+        state = torch.tensor(np.array(state), dtype=torch.float)
+        next_state = torch.tensor(np.array(next_state), dtype=torch.float)
+        action = torch.tensor(np.array(action), dtype=torch.long)
+        reward = torch.tensor(np.array(reward), dtype=torch.float)
+
+        if len(state.shape) == 1: 
+            state, next_state = torch.unsqueeze(state, 0), torch.unsqueeze(next_state, 0)
+            action, reward = torch.unsqueeze(action, 0), torch.unsqueeze(reward, 0)
             done = (done, )
 
         pred = self.model(state)
         target = pred.clone()
+
         for idx in range(len(done)):
             Q_new = reward[idx]
             if not done[idx]:
@@ -106,91 +224,13 @@ class DQNPlaceholder:
         self.optimizer.step()
 
     def train_long_memory(self):
-        """ Huấn luyện theo lô (Experience Replay) khi game over """
-        if len(self.memory) > 1000:
-            mini_sample = random.sample(self.memory, 1000)
+        if len(self.memory) > BATCH_SIZE:
+            mini_sample = random.sample(self.memory, BATCH_SIZE)
         else:
             mini_sample = self.memory
-
+        
         states, actions, rewards, next_states, dones = zip(*mini_sample)
         self.train_step(states, actions, rewards, next_states, dones)
 
-    def get_path(self, start, goal, obstacles, grid_size):
-        """ Hàm chính tương tác với game.py """
-        head = start
-        state = self.get_state(head, goal, obstacles, grid_size)
-
-        # HỌC TỪ BƯỚC ĐI TRƯỚC (Reward Calculation)
-        if self.last_state is not None:
-            if len(obstacles) < self.last_length:
-                # GAME OVER (Rắn bị reset độ dài)
-                self.train_step(self.last_state, self.last_action, -10, state, True)
-                self.memory.append((self.last_state, self.last_action, -10, state, True))
-                self.train_long_memory()
-                self.n_games += 1
-                self.last_state = None
-                print(f"Game: {self.n_games} | Epsilon: {max(0, 80 - self.n_games)}")
-            else:
-                # BƯỚC ĐI BÌNH THƯỜNG
-                reward = 0
-                if len(obstacles) > self.last_length:
-                    reward = 10 # Điểm thưởng do ăn được mồi
-                else:
-                    # Thưởng/phạt nhẹ dựa trên việc tới gần/ra xa mồi
-                    dist_now = abs(head[0]-goal[0]) + abs(head[1]-goal[1])
-                    dist_old = abs(self.last_head[0]-self.last_food[0]) + abs(self.last_head[1]-self.last_food[1])
-                    reward = 1 if dist_now < dist_old else -1
-
-                self.train_step(self.last_state, self.last_action, reward, state, False)
-                self.memory.append((self.last_state, self.last_action, reward, state, False))
-
-        # ĐƯA RA QUYẾT ĐỊNH (Exploration vs Exploitation)
-        self.epsilon = 80 - self.n_games
-        final_move = [0, 0, 0]
-        
-        if random.randint(0, 200) < self.epsilon:
-            # Randomness (Khám phá môi trường lúc đầu)
-            move = random.randint(0, 2)
-            final_move[move] = 1
-        else:
-            # Dùng kiến thức đã học (AI thực thi)
-            state0 = torch.tensor(state, dtype=torch.float)
-            prediction = self.model(state0)
-            move = torch.argmax(prediction).item()
-            final_move[move] = 1
-
-        # DIỄN DỊCH HÀNH ĐỘNG RA TỌA ĐỘ BƯỚC ĐI
-        # Lấy hướng hiện tại của rắn
-        if len(obstacles) > 1:
-            neck = obstacles[1]
-        else:
-            neck = (head[0]-1, head[1])
-        dir_r = head[0] > neck[0]
-        dir_d = head[1] > neck[1]
-        dir_l = head[0] < neck[0]
-        dir_u = head[1] < neck[1]
-
-        clock_wise = [(0,-1), (1,0), (0,1), (-1,0)] # UP, RIGHT, DOWN, LEFT
-        idx = 0
-        if dir_r: idx = 1
-        elif dir_d: idx = 2
-        elif dir_l: idx = 3
-
-        if np.array_equal(final_move, [1, 0, 0]):
-            new_dir = clock_wise[idx] # Đi thẳng
-        elif np.array_equal(final_move, [0, 1, 0]):
-            new_dir = clock_wise[(idx + 1) % 4] # Rẽ phải
-        else:
-            new_dir = clock_wise[(idx - 1) % 4] # Rẽ trái
-
-        next_head = (head[0] + new_dir[0], head[1] + new_dir[1])
-
-        # Lưu lại trạng thái để học ở khung hình kế tiếp
-        self.last_state = state
-        self.last_action = final_move
-        self.last_head = head
-        self.last_food = goal
-        self.last_length = len(obstacles)
-
-        # Trả về 1 bước đi cho game.py
-        return [next_head], [start]
+    def save_model(self):
+        torch.save(self.model.state_dict(), self.model_path)

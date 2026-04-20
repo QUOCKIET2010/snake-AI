@@ -24,6 +24,9 @@ class ControlPanel:
         self.speed_dropdown = Dropdown(x + self.pad_x, y + 200, w - 2*self.pad_x, 35, "SIMULATION SPEED", 
                                        ["x1 (Slow)", "x2 (Normal)", "x5 (Fast)", "x10 (Turbo)"], 1)
         
+        self.size_dropdown = Dropdown(x + self.pad_x, y + 270, w - 2*self.pad_x, 35, "MAP SIZE (GRID)", ["5x5 (Dễ)", "10x10 (Trung bình)", "15x15 (Khó)", "20x20 (Tối đa)"])
+        self.size_dropdown.selected_index = 3
+        
         # 3. Visual Toggles
         start_y = 480
         self.tg_path = Toggle(x + self.pad_x, start_y, w - 2*self.pad_x, 30, "Show AI Path", True)
@@ -89,3 +92,6 @@ class ControlPanel:
         self._draw_text(surface, label, self.rect.x + self.pad_x, y, self.font_stat_label, COLORS["text_muted"])
         val_img = self.font_stat_val.render(value, True, COLORS["text"])
         surface.blit(val_img, (self.rect.right - self.pad_x - val_img.get_width(), y))
+        self.size_dropdown.draw(surface)
+        self.speed_dropdown.draw(surface) 
+        self.algo_dropdown.draw(surface)
